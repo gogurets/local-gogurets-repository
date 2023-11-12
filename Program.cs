@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Telegram.Bot;
 using Telegram.Bot.Args;
 using Telegram.Bot.Types.ReplyMarkups;
@@ -8,6 +9,7 @@ using Telegram.Bot.Types.ReplyMarkups;
 class Program
 {
     private static ITelegramBotClient botClient;
+    private static Dictionary<long, ChatData> chatDataDictionary = new Dictionary<long, ChatData>();
     private static Dictionary<long, UserState> userStates = new Dictionary<long, UserState>();
     private static Dictionary<string, Dictionary<string, int>> partMileageThresholds = MileageThresholds.PartMileageThresholds;
     private static Dictionary<string, Dictionary<string, int>> partCounters = Parts.PartCounters;
@@ -17,7 +19,6 @@ class Program
         public int currentMileage;
         public string engineType;
     }
-
     static void Main(string[] args)
     {
         string token = "6647436556:AAEZuhGBXfEI4tE-ftwyN_0DywS00J69mn8";
@@ -39,25 +40,24 @@ class Program
             var chatId = e.Message.Chat.Id;
             var message = e.Message.Text;
 
-            if (!userStates.ContainsKey(chatId))
+            if (!chatDataDictionary.ContainsKey(chatId))
             {
-                userStates[chatId] = new UserState();
+                chatDataDictionary[chatId] = new ChatData();
             }
-            var userState = userStates[chatId];
 
-            if (message == "/start" || message == "/restart")
+            var chatData = chatDataDictionary[chatId];
+
+            if (string.IsNullOrEmpty(chatData.EngineType))
             {
-                userState.engineType = null;
-                userState.currentMileage = 0;
-                var keyboard = GetEngineTypeKeyboard();
-                botClient.SendTextMessageAsync(chatId, "Выберите тип двигателя:", replyMarkup: keyboard);
-            }
-            else if (string.IsNullOrEmpty(userState.engineType))
-            {
-                if (partMileageThresholds.ContainsKey(message))
+                if (message == "/start")
                 {
-                    userState.engineType = message;
-                    botClient.SendTextMessageAsync(chatId, $"Вы выбрали тип двигателя: {userState.engineType}. Пожалуйста, введите текущий пробег в километрах:");
+                    var keyboard = GetEngineTypeKeyboard();
+                    botClient.SendTextMessageAsync(chatId, "Выберите тип двигателя:", replyMarkup: keyboard);
+                }
+                else if (partMileageThresholds.ContainsKey(message))
+                {
+                    chatData.EngineType = message;
+                    botClient.SendTextMessageAsync(chatId, $"Вы выбрали тип двигателя: {chatData.EngineType}. Пожалуйста, введите текущий пробег в километрах:");
                 }
                 else
                 {
@@ -68,7 +68,7 @@ class Program
             {
                 if (int.TryParse(message, out int mileage))
                 {
-                    HandleMileageUpdate(chatId, userState, mileage);
+                    Task.Run(() => HandleMileageUpdate(chatId, mileage, chatData));
                 }
                 else
                 {
@@ -78,17 +78,17 @@ class Program
         }
     }
 
-    private static void HandleMileageUpdate(long chatId, UserState userState, int mileage)
+    private static void HandleMileageUpdate(long chatId, int newMileage, ChatData chatData)
     {
-        if (mileage < userState.currentMileage)
+        if (newMileage < chatData.CurrentMileage)
         {
             botClient.SendTextMessageAsync(chatId, "Ошибка: введенный пробег меньше предыдущего значения.");
             return;
         }
 
-        var advice = GetAdvice(userState.engineType, mileage, userState.currentMileage);
+        var advice = GetAdvice(chatData.EngineType, newMileage, chatData);
 
-        userState.currentMileage = mileage;
+        chatData.CurrentMileage = newMileage;
 
         botClient.SendTextMessageAsync(chatId, advice);
     }
@@ -100,8 +100,7 @@ class Program
         return new ReplyKeyboardMarkup(keyboardButtons, true, true);
     }
 
-
-    private static string GetAdvice(string engineType, int newMileage, int currentMileage)
+    private static string GetAdvice(string engineType, int mileage, ChatData chatData)
     {
         if (!partMileageThresholds.ContainsKey(engineType))
         {
@@ -113,22 +112,17 @@ class Program
 
         foreach (var part in mileageThresholds.Keys)
         {
-            if (!partCounters.ContainsKey(engineType))
+            if (!chatData.PartCounters.ContainsKey(part))
             {
-                partCounters[engineType] = new Dictionary<string, int>();
+                chatData.PartCounters[part] = 0;
             }
 
-            if (!partCounters[engineType].ContainsKey(part))
-            {
-                partCounters[engineType][part] = 0;
-            }
+            chatData.PartCounters[part] += mileage - chatData.CurrentMileage;
 
-            partCounters[engineType][part] += newMileage - currentMileage;
-
-            if (partCounters[engineType][part] >= mileageThresholds[part])
+            if (chatData.PartCounters[part] >= mileageThresholds[part])
             {
                 advice.Add($"Советуется {part}");
-                partCounters[engineType][part] = 0;
+                chatData.PartCounters[part] = 0;
             }
         }
 
@@ -140,5 +134,10 @@ class Program
         return string.Join("\n", advice);
     }
 
+    private class ChatData
+    {
+        public string EngineType { get; set; }
+        public int CurrentMileage { get; set; }
+        public Dictionary<string, int> PartCounters { get; } = new Dictionary<string, int>();
+    }
 }
-
